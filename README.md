@@ -33,7 +33,7 @@ The weigth for stage-1 LLaVA is [liuhaotian/llava-pretrain-vicuna-7b-v1.3](https
 
 ```bash
 # Train
-sh scripts/start_tune.sh
+sh scripts/ds_tune.sh
 
 # Eval
 sh scripts/mme.sh
