@@ -1,4 +1,4 @@
-# Official Repo of Re-Imagining Multimodal Instruction Tuning: A Representation View
+# Official Repo of Re-Imagining Multimodal Instruction Tuning: A Representation View (Our code will be released soon!)
 
 <div align="center">
   <img src=".\images\mainfig.png">
