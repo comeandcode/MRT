@@ -18,11 +18,13 @@ git clone https://github.com/comeandcode/MRT.git
 cd MRT
 
 conda create -n mrt python=3.9 -y
+conda activate mrt
 pip install -e . --no-cache-dir
 pip install numpy==1.26.4
-pip install transformers==4.37.1
+pip install ninja
+pip install transformers==4.31.0
 pip install torch==2.0.1
-pip install flash==2.6.3 –-no-build-isolation –-no-cache-dir
+pip install flash-attn==2.6.3 --no-build-isolation --no-cache-dir
 
 ```
 ## LLaVA_align Weights
@@ -49,3 +51,4 @@ you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
+
