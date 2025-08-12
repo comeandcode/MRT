@@ -1,5 +1,7 @@
 # Official Repo of Re-Imagining Multimodal Instruction Tuning: A Representation View
 
+Our [arxiv](https://arxiv.org/abs/2503.00723) version is currently available. Please check it out! 🔥🔥🔥
+
 <div align="center">
   <img src=".\images\mainfig.png">
 </div>
