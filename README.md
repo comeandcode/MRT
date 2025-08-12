@@ -1,4 +1,4 @@
-# Official Repo of Re-Imagining Multimodal Instruction Tuning: A Representation View (Our code will be released soon!)
+# Official Repo of Re-Imagining Multimodal Instruction Tuning: A Representation View
 
 <div align="center">
   <img src=".\images\mainfig.png">
@@ -19,6 +19,7 @@ cd MRT
 
 conda create -n mrt python=3.9 -y
 conda activate mrt
+pip install packaging
 pip install -e . --no-cache-dir
 pip install numpy==1.26.4
 pip install ninja
@@ -35,10 +36,10 @@ The weigth for stage-1 LLaVA is [liuhaotian/llava-pretrain-vicuna-7b-v1.3](https
 
 ```bash
 # Train
-sh scripts/ds_tune.sh
+sh train.sh
 
 # Eval
-sh scripts/mme.sh
+sh eval.sh
 
 ```
 ## License
