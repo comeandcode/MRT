@@ -28,6 +28,34 @@ from transformers import TrainerCallback
 
 
 class LLaVATrainer(Trainer):
+    def create_optimizer(self):
+        """
+        Setup the optimizer.
+        """
+        if self.optimizer is None:
+            
+            decay_parameters = [
+                name for name, param in self.model.named_parameters() 
+                if not any(nd in name for nd in ["bias", "LayerNorm.weight", "norm.weight"])
+            ]
+
+            optimizer_grouped_parameters = [
+                {
+                    "params": [p for n, p in self.model.named_parameters() if n in decay_parameters and p.requires_grad],
+                    "weight_decay": self.args.weight_decay,
+                },
+                {
+                    "params": [p for n, p in self.model.named_parameters() if n not in decay_parameters and p.requires_grad],
+                    "weight_decay": 0.0,
+                },
+            ]
+            
+            self.optimizer = Adam(
+                optimizer_grouped_parameters,
+                lr=self.args.learning_rate,
+            )
+            
+        return self.optimizer
     
     def _save_checkpoint(self, model, trial, metrics=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):

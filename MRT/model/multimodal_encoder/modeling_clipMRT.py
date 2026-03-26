@@ -576,33 +576,16 @@ class LowRankRotateLayer(nn.Module):
         self.weight = nn.Parameter(torch.empty(n, m, dtype=torch.float32), requires_grad=True)
         if init_orth:
             nn.init.orthogonal_(self.weight)
-        
-        # Cache transposed weight to avoid repeated transpose operations
-        self.register_buffer('_weight_t_cache', None)
-        self._weight_t_cache_valid = False
 
-    def forward(self, x):
-        # Ensure both tensors have the same dtype
-        return torch.matmul(x, self.weight.to(x.dtype))
+    def get_orthogonal_weight(self):
+        w = self.weight.to(torch.float32)
+        Q, R = torch.linalg.qr(w)
+        sign = torch.sign(torch.diag(R))
+        sign = torch.where(sign == 0, torch.ones_like(sign), sign)
+        return Q * sign
     
-    def get_weight_t(self, dtype=torch.float32):
-        """Get cached transposed weight in the specified dtype"""
-        if not self._weight_t_cache_valid or self._weight_t_cache is None:
-            self._weight_t_cache = self.weight.t().to(dtype)
-            self._weight_t_cache_valid = True
-        return self._weight_t_cache.to(dtype)
-    
-    def orthogonalize(self):
-        """Call this manually to maintain orthogonality"""
-        with torch.no_grad():
-            U, _, Vt = torch.linalg.svd(self.weight.data.float(), full_matrices=False)
-            self.weight.data = (U @ Vt).to(self.weight.dtype)
-            # Invalidate cache when weight changes
-            self._weight_t_cache_valid = False
-
-
 class RT_Vision(nn.Module):
-    def __init__(self, embed_dim: int, low_rank_dimension: int, dropout: float = 0.0, 
+    def __init__(self, embed_dim: int, low_rank_dimension: int, dropout: float = 0.0,
                  act_fn: str = 'linear', dtype: torch.dtype = torch.bfloat16, **kwargs):
         super().__init__()
         self.rotate_layer = LowRankRotateLayer(embed_dim, low_rank_dimension, init_orth=True)
@@ -612,37 +595,24 @@ class RT_Vision(nn.Module):
         self.dtype = dtype
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Store original dtype to ensure we return the same type
         original_dtype = hidden_states.dtype
-        
-        # Convert to working precision once at the beginning
-        # Use float32 for numerical stability in rotations
+        source_dtype = self.learned_source.weight.dtype
+
         hidden_f32 = hidden_states.to(torch.float32)
-        hidden_bf16 = hidden_states.to(self.dtype) if original_dtype != self.dtype else hidden_states
-        
-        # Rotation in float32 for numerical stability
-        rotated_f32 = self.rotate_layer(hidden_f32)
-        rotated_bf16 = rotated_f32.to(self.dtype)
-        
-        # Learned transformation in target dtype
-        transformed = self.learned_source(hidden_bf16)
-        
-        # Compute difference (both tensors are now in same dtype)
-        difference = self.act_fn(transformed - rotated_bf16)
-        
-        # Convert difference back to float32 for matrix multiplication
-        difference_f32 = difference.to(torch.float32)
-        
-        # Use cached transposed weight
-        weight_t_f32 = self.rotate_layer.get_weight_t(torch.float32)
-        intervention_f32 = torch.matmul(difference_f32, weight_t_f32)
-        
-        # Convert intervention back to original dtype
-        intervention = intervention_f32.to(original_dtype)
-        
-        return hidden_states + self.dropout(intervention)
+        hidden_for_source = hidden_states.to(source_dtype)
 
+        w_orth = self.rotate_layer.get_orthogonal_weight()
 
+        rotated_f32 = torch.matmul(hidden_f32, w_orth)
+        rotated_for_source = rotated_f32.to(source_dtype)
+
+        transformed = self.learned_source(hidden_for_source)
+        difference = self.act_fn(transformed - rotated_for_source)
+
+        intervention_f32 = torch.matmul(difference.to(torch.float32), w_orth.t())
+
+        return hidden_states + self.dropout(intervention_f32.to(original_dtype))
+    
 class CLIPEncoder(nn.Module):
     """
     Transformer encoder consisting of `config.num_hidden_layers` self attention layers. Each layer is a
@@ -658,11 +628,14 @@ class CLIPEncoder(nn.Module):
         self.layers = nn.ModuleList([CLIPEncoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.V_rank = V_Rank
         
-        self.vision_rt = nn.ModuleList([RT_Vision(
-            embed_dim=1024,
-            low_rank_dimension=self.V_rank,
-            dtype=torch.bfloat16,
-            ) for _ in range(config.num_hidden_layers)])
+        self.vision_rt = nn.ModuleList([
+            RT_Vision(
+                embed_dim=1024,
+                low_rank_dimension=self.V_rank,
+                dtype=torch.bfloat16,
+            ) if 1 <= i <= 22 else nn.Identity() 
+            for i in range(config.num_hidden_layers)
+        ])
         for _, param in self.vision_rt.named_parameters():
             param.requires_grad = True
         
@@ -744,7 +717,10 @@ class CLIPEncoder(nn.Module):
                 )
                 
 
-            hidden_states = self.vision_rt[idx](layer_outputs[0])
+            if 1 <= idx <= 22:
+                hidden_states = self.vision_rt[idx](layer_outputs[0])
+            else:
+                hidden_states = layer_outputs[0]
 
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
@@ -757,8 +733,6 @@ class CLIPEncoder(nn.Module):
         return BaseModelOutput(
             last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
         )
-    
-
 
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask
 def _make_causal_mask(

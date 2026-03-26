@@ -544,33 +544,17 @@ class LowRankRotateLayer(nn.Module):
         self.weight = nn.Parameter(torch.empty(n, m, dtype=torch.float32), requires_grad=True)
         if init_orth:
             nn.init.orthogonal_(self.weight)
-        
-        # Cache transposed weight to avoid repeated transpose operations
-        self.register_buffer('_weight_t_cache', None)
-        self._weight_t_cache_valid = False
 
-    def forward(self, x):
-        # Ensure both tensors have the same dtype
-        return torch.matmul(x, self.weight.to(x.dtype))
-    
-    def get_weight_t(self, dtype=torch.float32):
-        """Get cached transposed weight in the specified dtype"""
-        if not self._weight_t_cache_valid or self._weight_t_cache is None:
-            self._weight_t_cache = self.weight.t().to(dtype)
-            self._weight_t_cache_valid = True
-        return self._weight_t_cache.to(dtype)
-    
-    def orthogonalize(self):
-        """Call this manually to maintain orthogonality"""
-        with torch.no_grad():
-            U, _, Vt = torch.linalg.svd(self.weight.data.float(), full_matrices=False)
-            self.weight.data = (U @ Vt).to(self.weight.dtype)
-            # Invalidate cache when weight changes
-            self._weight_t_cache_valid = False
+    def get_orthogonal_weight(self):
+        w = self.weight.to(torch.float32)
+        Q, R = torch.linalg.qr(w)
+        sign = torch.sign(torch.diag(R))
+        sign = torch.where(sign == 0, torch.ones_like(sign), sign)
+        return Q * sign
 
 
 class RT_LM(nn.Module):
-    def __init__(self, embed_dim: int, low_rank_dimension: int, dropout: float = 0.0, 
+    def __init__(self, embed_dim: int, low_rank_dimension: int, dropout: float = 0.0,
                  act_fn: str = 'linear', dtype: torch.dtype = torch.bfloat16, **kwargs):
         super().__init__()
         self.rotate_layer = LowRankRotateLayer(embed_dim, low_rank_dimension, init_orth=True)
@@ -580,35 +564,24 @@ class RT_LM(nn.Module):
         self.dtype = dtype
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Store original dtype to ensure we return the same type
         original_dtype = hidden_states.dtype
-        
-        # Convert to working precision once at the beginning
-        # Use float32 for numerical stability in rotations
+        source_dtype = self.learned_source.weight.dtype
+
         hidden_f32 = hidden_states.to(torch.float32)
-        hidden_bf16 = hidden_states.to(self.dtype) if original_dtype != self.dtype else hidden_states
-        
-        # Rotation in float32 for numerical stability
-        rotated_f32 = self.rotate_layer(hidden_f32)
-        rotated_bf16 = rotated_f32.to(self.dtype)
-        
-        # Learned transformation in target dtype
-        transformed = self.learned_source(hidden_bf16)
-        
-        # Compute difference (both tensors are now in same dtype)
-        difference = self.act_fn(transformed - rotated_bf16)
-        
-        # Convert difference back to float32 for matrix multiplication
-        difference_f32 = difference.to(torch.float32)
-        
-        # Use cached transposed weight
-        weight_t_f32 = self.rotate_layer.get_weight_t(torch.float32)
-        intervention_f32 = torch.matmul(difference_f32, weight_t_f32)
-        
-        # Convert intervention back to original dtype
-        intervention = intervention_f32.to(original_dtype)
-        
-        return hidden_states + self.dropout(intervention)
+        hidden_for_source = hidden_states.to(source_dtype)
+
+        w_orth = self.rotate_layer.get_orthogonal_weight()
+
+        rotated_f32 = torch.matmul(hidden_f32, w_orth)
+        rotated_for_source = rotated_f32.to(source_dtype)
+
+        transformed = self.learned_source(hidden_for_source)
+        difference = self.act_fn(transformed - rotated_for_source)
+
+        intervention_f32 = torch.matmul(difference.to(torch.float32), w_orth.t())
+
+        return hidden_states + self.dropout(intervention_f32.to(original_dtype))
+
 
 
 @add_start_docstrings(
@@ -639,14 +612,14 @@ class LlamaModel(LlamaPreTrainedModel):
         # Add representation tuning modules for prefix and suffix
         self.LM_rank = LM_rank
         if self.LM_rank != 0:
-            # Prefix representation tuning modules (matching your naming convention)
-            self.prefix_lm_rt = nn.ModuleList([RT_LM(  # Assuming you have RT_LM similar to RT_Vision
+            # Prefix representation tuning modules
+            self.prefix_lm_rt = nn.ModuleList([RT_LM(
                 embed_dim=config.hidden_size,
                 low_rank_dimension=self.LM_rank,
                 dtype=torch.bfloat16,
             ) for _ in range(config.num_hidden_layers)])
             
-            # Suffix representation tuning modules (matching your naming convention)
+            # Suffix representation tuning modules
             self.suffix_lm_rt = nn.ModuleList([RT_LM(
                 embed_dim=config.hidden_size,
                 low_rank_dimension=self.LM_rank,
@@ -688,29 +661,28 @@ class LlamaModel(LlamaPreTrainedModel):
         return combined_attention_mask
 
     def apply_representation_tuning(self, hidden_states, layer_idx, intervention_locations):
-        """
-        Optimized version using in-place operations with clone to avoid autograd issues.
-        Most efficient for moderate sequence lengths.
-        """
         if intervention_locations is None or len(intervention_locations) < 2:
             return hidden_states
             
-        # Clone to avoid in-place modification issues
-        result = hidden_states.clone()
-        
-        # Extract prefix and suffix locations
         prefix_start, prefix_end = intervention_locations[0]
         suffix_start, suffix_end = intervention_locations[1]
         
-        # Apply transformations directly to slices
-        result[:, prefix_start:prefix_end+1, :] = self.prefix_lm_rt[layer_idx](
+        prefix_modified = self.prefix_lm_rt[layer_idx](
             hidden_states[:, prefix_start:prefix_end+1, :]
         )
-        result[:, suffix_start:suffix_end+1, :] = self.suffix_lm_rt[layer_idx](
+        suffix_modified = self.suffix_lm_rt[layer_idx](
             hidden_states[:, suffix_start:suffix_end+1, :]
         )
         
-        return result
+        new_hidden_states = torch.cat([
+            hidden_states[:, :prefix_start, :],
+            prefix_modified,
+            hidden_states[:, prefix_end+1:suffix_start, :],
+            suffix_modified,
+            hidden_states[:, suffix_end+1:, :]
+        ], dim=1)
+        
+        return new_hidden_states
 
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
@@ -852,7 +824,7 @@ class LlamaModel(LlamaPreTrainedModel):
 class LlamaForCausalLM(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config,PT_len, VIT_PT_len):
+    def __init__(self, config):
         super().__init__(config)
         self.model = LlamaModel(config)
         self.pretraining_tp = config.pretraining_tp

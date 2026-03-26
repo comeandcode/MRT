@@ -249,6 +249,8 @@ def smart_tokenizer_and_embedding_resize(
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
 
+
+
 def _tokenize_fn(strings: Sequence[str],
                  tokenizer: transformers.PreTrainedTokenizer) -> Dict:
     tokenized_list = [
@@ -707,9 +709,12 @@ class LazySupervisedDataset(Dataset):
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
         
+        model_max_len = 1024
+        if len(data_dict["input_ids"]) > model_max_len:
+            data_dict["input_ids"] = data_dict["input_ids"][:model_max_len]
+            data_dict["labels"] = data_dict["labels"][:model_max_len]
         element = data_dict["input_ids"]
         prompt_len = len(element)
-        model_max_len = 1024
         if self.active_prefix_token or self.active_suffix_token:
             intervention_locations = get_locations_llava_new(prompt_len, self.intervention_len, model_max_len)
             if not self.active_prefix_token:
@@ -825,6 +830,7 @@ def train():
                 LM_rank = model_args.RT_rank_llm,
                 V_rank=model_args.RT_rank_vision,
                 cache_dir=training_args.cache_dir,
+                torch_dtype=torch.bfloat16,
                 **bnb_model_from_pretrained_args
             )
     else:
@@ -966,10 +972,11 @@ def train():
             mem_usage = torch.cuda.memory_reserved(local_rank)
             if mem_usage > (2 / 3) * mem_info:
                 torch.cuda.empty_cache()
-                print(f"cleaning cache on GPU {local_rank}")
             else:
                 pass
-
+    
+    model.to(torch.bfloat16)
+    
     for name, param in model.named_parameters():
         if 'mm_rt' in name or 'vision_rt' in name or 'lm_rt' in name:
             param.requires_grad = True
@@ -989,6 +996,7 @@ def train():
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)
+    trainer.add_callback(EmptyCacheCallback)
     print(f"Optimizer:{trainer.optimizer}, {type(trainer.optimizer)}")
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

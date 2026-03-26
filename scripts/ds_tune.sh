@@ -8,7 +8,7 @@ MODEL_VERSION="vicuna-7b-v1.3"
 
 RT_rank_llm=4
 RT_rank_vision=6
-learning_rate=7e-4
+learning_rate=6e-4
 max_len=1024
 tune_mm_mlp_adapter=false
 tune_lm_header=false
@@ -37,7 +37,7 @@ deepspeed --num_gpus=2 MRT/train/train_memMRT.py \
     --learning_rate $learning_rate \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
-    --lr_scheduler_type "cosine" \
+    --lr_scheduler_type "linear" \
     --logging_steps 1 \
     --tf32 True \
     --model_max_length $max_len \
@@ -47,7 +47,4 @@ deepspeed --num_gpus=2 MRT/train/train_memMRT.py \
     --RT_rank_llm $RT_rank_llm \
     --RT_rank_vision $RT_rank_vision \
     --tune_mm_mlp_adapter $tune_mm_mlp_adapter \
-    --tune_lm_header $tune_lm_header \
-    --load_best_model_at_end True \
-    --metric_for_best_model "train_loss" \
-    --greater_is_better false
+    --tune_lm_header $tune_lm_header 
